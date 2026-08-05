@@ -1,14 +1,9 @@
 class SubtitleService:
     @staticmethod
     def chunk_transcription(transcription, words_per_chunk=3):
-        """
-        Groups the transcription segments into chunks of words.
-        """
         chunks = []
-        
         for segment in transcription:
             words = segment['text'].split()
-            # Split words into groups
             for i in range(0, len(words), words_per_chunk):
                 word_group = words[i:i + words_per_chunk]
                 chunks.append({
@@ -17,6 +12,12 @@ class SubtitleService:
                     "text": " ".join(word_group)
                 })
         return chunks
+
+    @staticmethod
+    def _parse_kinetic_tags(text):
+        # Convert [HIGHLIGHT] word [/HIGHLIGHT] to ASS overrides
+        # For this PoC: [HIGHLIGHT] becomes bold and color change
+        return text.replace("[HIGHLIGHT]", "{\\b1\\c&H0000FF&}").replace("[/HIGHLIGHT]", "{\\b0\\c&HFFFFFF&}")
 
     @staticmethod
     def export_srt(chunks, output_path):
@@ -34,7 +35,8 @@ class SubtitleService:
             for chunk in chunks:
                 start = SubtitleService._format_time_ass(chunk['start'])
                 end = SubtitleService._format_time_ass(chunk['end'])
-                f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{chunk['text']}\n")
+                text = SubtitleService._parse_kinetic_tags(chunk['text'])
+                f.write(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}\n")
 
     @staticmethod
     def _format_time_srt(seconds):
