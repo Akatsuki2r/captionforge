@@ -1,11 +1,12 @@
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                               QPushButton, QTableWidget, QTableWidgetItem, QFileDialog, QLabel, QHeaderView)
+                               QPushButton, QTableWidget, QTableWidgetItem, QFileDialog, 
+                               QHeaderView, QProgressDialog, QMessageBox)
 from PySide6.QtCore import Qt
 import tempfile
 import os
-from src.services.whisper_service import WhisperService
 from src.services.subtitle_service import SubtitleService
-from src.services.ffmpeg_service import FFmpegService
+from src.ui.transcription_thread import TranscriptionThread
+from src.ui.burn_thread import BurnThread
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -13,7 +14,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("CaptionForge")
         self.setMinimumSize(900, 600)
         
-        self.whisper = WhisperService()
         self.sub_service = SubtitleService()
         self.current_audio = None
         self.current_video = None
@@ -50,34 +50,51 @@ class MainWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Audio", "", "Audio Files (*.mp3 *.wav)")
         if file_path:
             self.current_audio = file_path
-            print(f"Loaded audio: {file_path}")
+            self.statusBar().showMessage(f"Loaded audio: {os.path.basename(file_path)}")
 
     def load_video(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open Video", "", "Video Files (*.mp4)")
         if file_path:
             self.current_video = file_path
-            print(f"Loaded video: {file_path}")
+            self.statusBar().showMessage(f"Loaded video: {os.path.basename(file_path)}")
 
     def generate_captions(self):
         if not self.current_audio:
+            QMessageBox.warning(self, "Warning", "Please load an audio file first.")
             return
         
-        print("Generating captions...")
-        transcription = self.whisper.transcribe(self.current_audio)
-        chunks = self.sub_service.chunk_transcription(transcription)
+        self.progress = QProgressDialog("Transcribing... (This may take a while)", "Cancel", 0, 0, self)
+        self.progress.setWindowModality(Qt.WindowModal)
+        self.progress.show()
         
+        self.transcription_thread = TranscriptionThread(self.current_audio)
+        self.transcription_thread.finished.connect(self.on_transcription_finished)
+        self.transcription_thread.error.connect(self.on_error)
+        self.transcription_thread.start()
+
+    def on_transcription_finished(self, transcription):
+        self.progress.close()
+        chunks = self.sub_service.chunk_transcription(transcription)
         self.table.setRowCount(len(chunks))
         for row, chunk in enumerate(chunks):
             self.table.setItem(row, 0, QTableWidgetItem(str(round(chunk['start'], 2))))
             self.table.setItem(row, 1, QTableWidgetItem(str(round(chunk['end'], 2))))
             self.table.setItem(row, 2, QTableWidgetItem(chunk['text']))
+        self.statusBar().showMessage("Transcription completed.")
+
+    def on_error(self, message):
+        self.progress.close()
+        QMessageBox.critical(self, "Error", message)
 
     def burn_subtitles(self):
         if not self.current_video or self.table.rowCount() == 0:
+            QMessageBox.warning(self, "Warning", "Load a video and generate captions first.")
             return
             
-        print("Burning subtitles...")
-        
+        output_path, _ = QFileDialog.getSaveFileName(self, "Save Video", "", "Video Files (*.mp4)")
+        if not output_path:
+            return
+
         # Extract data from table
         chunks = []
         for row in range(self.table.rowCount()):
@@ -88,15 +105,21 @@ class MainWindow(QMainWindow):
             })
         
         # Create temporary ASS file
-        with tempfile.NamedTemporaryFile(suffix=".ass", delete=False) as temp_ass:
-            temp_ass_path = temp_ass.name
-            self.sub_service.export_ass(chunks, temp_ass_path)
+        self.temp_ass = tempfile.NamedTemporaryFile(suffix=".ass", delete=False)
+        self.sub_service.export_ass(chunks, self.temp_ass.name)
             
-        output_path = "output.mp4"
+        self.progress = QProgressDialog("Burning subtitles...", "Cancel", 0, 0, self)
+        self.progress.setWindowModality(Qt.WindowModal)
+        self.progress.show()
         
-        # Burn subtitles
-        FFmpegService.burn_subtitles(self.current_video, temp_ass_path, output_path)
-        print(f"Video saved as {output_path}")
-        
-        # Cleanup
-        os.remove(temp_ass_path)
+        self.burn_thread = BurnThread(self.current_video, self.temp_ass.name, output_path)
+        self.burn_thread.finished.connect(self.on_burn_finished)
+        self.burn_thread.error.connect(self.on_error)
+        self.burn_thread.start()
+
+    def on_burn_finished(self, output_path):
+        self.progress.close()
+        if os.path.exists(self.temp_ass.name):
+            os.remove(self.temp_ass.name)
+        QMessageBox.information(self, "Success", f"Video saved to {output_path}")
+        self.statusBar().showMessage("Subtitle burning completed.")
